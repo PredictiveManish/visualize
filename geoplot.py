@@ -212,47 +212,121 @@ geoplot_template = """
 </html>
 """
 
-# It is retrieving the value of a variable from a nested dictionary using a path string (e.g., "key1/key2/key3")
+# Helper function to retrieve the value of a variable from a nested dictionary using a path string
+# For example, "agents/consumers/coordinates" would access state["agents"]["consumers"]["coordinates"]
 def read_var(state, var):
     return get_by_path(state, re.split("/", var))
 
 
 class GeoPlot:
     def __init__(self, config, options):
-        # Initialize the GeoPlot class with configuration and options.
+        """
+        Initialize the GeoPlot visualization class.
+        
+        Parameters:
+        -----------
+        config : dict
+            Configuration dictionary containing simulation metadata (name, num_episodes, num_steps_per_episode).
+        
+        options : dict
+            A dictionary containing:
+            - cesium_token: API token for Cesium Ion (required for map visualization)
+            - step_time: Time interval in seconds between simulation steps
+            - coordinates: Path to the coordinates data in the state object (e.g., "agents/consumers/coordinates")
+            - feature: Path to the feature/property data in the state object (e.g., "agents/consumers/money_spent")
+            - visualization_type: Type of visualization ('color' for heatmap or 'size' for bubble map)
+        """
         self.config = config
         (
-            self.cesium_token,   # Cesium API token for visualization
-            self.step_time,      # Time step between states.
-            self.entity_position,# Path to the position data in the state.
-            self.entity_property,# Path to the property data in the state.
-            self.visualization_type,# Type of visualization (e.g., Heatmap)
+            self.cesium_token,     # Cesium API token for visualization
+            self.step_time,        # Time step between states in seconds
+            self.entity_position,  # Path to the position data in the state
+            self.entity_property,  # Path to the property data in the state
+            self.visualization_type, # Type of visualization (color or size)
         ) = (
             options["cesium_token"],
             options["step_time"],
             options["coordinates"],
             options["feature"],
-            options["visualization_type"],
+            options.get("visualization_type", "color"),  # Default to color if not specified
         )
 
     def render(self, state_trajectory):
-        # Process the simulation data and generate GeoJSON and HTML files for visualization.
+        """
+        Process the simulation data and generate GeoJSON and HTML files for visualization.
         
-        coords, values = [], [] # Initializes lists for coordinates and values.
-        name = self.config["simulation_metadata"]["name"] # Simulation name.
-        geodata_path, geoplot_path = f"{name}.geojson", f"{name}.html" # File paths.
-        
-        # Extracting coordinates and property values from the simulation states.
-        for i in range(0, len(state_trajectory) - 1):
-            final_state = state_trajectory[i][-1] # Get the last state in the trajectory.
+        Parameters:
+        -----------
+        state_trajectory : list
+            A list of simulation states over time. The format is:
+            [
+                [  # Episode 0
+                    {  # Step 0 final state
+                        "agents": {
+                            "consumers": {
+                                "coordinates": [[lat1, lon1], [lat2, lon2], ...],  # List of coordinates
+                                "money_spent": [100, 200, ...]  # Corresponding values for each coordinate
+                            }
+                        }
+                    }
+                ],
+                [  # Episode 1
+                    {  # Step 0 final state
+                        "agents": {
+                            "consumers": {
+                                "coordinates": [[lat1, lon1], [lat2, lon2], ...],
+                                "money_spent": [150, 250, ...]
+                            }
+                        }
+                    }
+                ],
+                ...
+            ]
             
-            # Read position and property data from the final state.
+            Example mock data structure:
+            ```
+            # Mock state trajectory data (points and polygons)
+            coords = [
+                [[-71.03215355, 42.37951895], [-71.13215355, 42.42951895], [-71.03215355, 42.42951895], [-71.03215355, 42.37951895]],
+                [[-71.23215355, 42.36951895], [-71.03215355, 42.42051895], [-71.03215355, 42.46851895], [-71.23215355, 42.22341895]],
+            ]
+
+            # Each row is a time interval, and each column is the value for the i-th polygon in the coords array
+            values = [
+                [100, 40],
+                [200, 980],
+                [800, 240],
+                [50, 680],
+            ]
+
+            # Simulate the state trajectory
+            state_trajectory = [
+                [{"mock_coordinates_path": coords, "mock_feature_path": values[i]}]
+                for i in range(len(values))
+            ]
+            ```
+        """
+        
+        coords, values = [], []  # Initialize lists for coordinates and values
+        name = self.config["simulation_metadata"]["name"]  # Get simulation name from config
+        geodata_path, geoplot_path = f"{name}.geojson", f"{name}.html"  # Define output file paths
+        
+        # Extract coordinates and property values from the simulation states
+        # We're iterating through episodes and getting the final state of each episode
+        for i in range(0, len(state_trajectory) - 1):
+            final_state = state_trajectory[i][-1]  # Get the last state in the episode
+            
+            # Read position and property data from the final state using the provided paths
+            # coords will be a list of [lat, lon] pairs for each entity
             coords = np.array(read_var(final_state, self.entity_position)).tolist()
+            
+            # values will be a list of lists, where each inner list contains property values for all entities at one time step
             values.append(
                 np.array(read_var(final_state, self.entity_property)).flatten().tolist()
             )
             
-        # Generate timestamps for the simulation based on step_time and metadata.
+        # Generate timestamps for the simulation based on step_time and metadata
+        # This creates a sequence of timestamps starting from now and separated by step_time seconds
         start_time = pd.Timestamp.utcnow()
         timestamps = [
             start_time + pd.Timedelta(seconds=i * self.step_time)
@@ -263,41 +337,43 @@ class GeoPlot:
         ]
         
         # Create GeoJSON data for visualization
+        # Each entity (e.g., consumer) will have its own GeoJSON FeatureCollection
         geojsons = []
         for i, coord in enumerate(coords):
-            features = []  # List to store features for a signal coordinate.
+            features = []  # List to store features for a single coordinate over time
             for time, value_list in zip(timestamps, values):
                 features.append(
                     {
-                        "type": "Feature", # GeoJSON feature type
+                        "type": "Feature",  # GeoJSON feature type
                         "geometry": {
-                            "type": "Point", # Point geometry with latitude and longitude.
-                            "coordinates": [coord[1], coord[0]],
+                            "type": "Point",  # Point geometry with longitude and latitude (GeoJSON order)
+                            "coordinates": [coord[1], coord[0]],  # Note: GeoJSON uses [lon, lat] order
                         },
                         "properties": {
-                            "value": value_list[i], # Value associated with the point.
-                            "time": time.isoformat(), # Timestamp in ISO format.
-                            
+                            "id": f"entity_{i}",  # Unique identifier for this entity
+                            "value": value_list[i],  # Value associated with this entity at this time
+                            "time": time.isoformat(),  # Timestamp in ISO format
                         },
                     }
                 )
-            geojsons.append({"type": "FeatureCollection", "features": features}) # Add features to GeoJSON
+            geojsons.append({"type": "FeatureCollection", "features": features})  # Add features to GeoJSON
             
-        # Write the GeoJSON data to a file.
+        # Write the GeoJSON data to a file
         with open(geodata_path, "w", encoding="utf-8") as f:
             json.dump(geojsons, f, ensure_ascii=False, indent=2)
         
-        # Create an HTML visualization using the GeoJSON data and Cesium API 
+        # Create an HTML visualization using the GeoJSON data and Cesium API
+        # This substitutes variables in the HTML template with actual values
         tmpl = Template(geoplot_template)
         with open(geoplot_path, "w", encoding="utf-8") as f:
             f.write(
                 tmpl.substitute(
                     {
-                        "accessToken": self.cesium_token, # Cesium API token.
-                        "startTime": timestamps[0].isoformat(), # Simulation start time.
-                        "stopTime": timestamps[-1].isoformat(), # Simulation end time.
-                        "data": json.dumps(geojsons),          # GeoJSON data as a string.
-                        "visualType": self.visualization_type, # Visualization type.
+                        "accessToken": self.cesium_token,  # Cesium API token
+                        "startTime": timestamps[0].isoformat(),  # Simulation start time
+                        "stopTime": timestamps[-1].isoformat(),  # Simulation end time
+                        "data": json.dumps(geojsons),  # GeoJSON data as a string
+                        "visualType": self.visualization_type,  # Visualization type (color or size)
                     }
                 )
             )
